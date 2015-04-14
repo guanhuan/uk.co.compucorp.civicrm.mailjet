@@ -2,97 +2,113 @@
 
 class CRM_Mailjet_BAO_Event extends CRM_Mailjet_DAO_Event {
 
-
-  static function getMailjetCustomCampaignId($jobId){
-  	if($jobId !== null){
-  	  //get the mailing job
+  /*
+   * Get a MJ campaign ID based on an job id.
+   *
+   * @param integer
+   *  The job id for the required mailing.
+   *
+   * @return string
+   *  The MJ custom campaign ID.
+   */
+  static function getMailjetCustomCampaignId($jobId) {
+    if ($jobId !== NULL) {
+      // Get the mailing job.
       $mailingJob = civicrm_api3('MailingJob', 'get', $params = array('id' => $jobId));
-	  if(isset($mailingJob['values'][$jobId]['job_type'])){
-	  $jobType = $mailingJob['values'][$jobId]['job_type'];
-		//if job is not test
-	    if($jobType == 'child'){
+      if (isset($mailingJob['values'][$jobId]['job_type'])) {
+        $jobType = $mailingJob['values'][$jobId]['job_type'];
+        if ($jobType == 'child') {
           $timestamp = strtotime($mailingJob['values'][$jobId]['scheduled_date']);
           return $jobId . 'MJ' . $timestamp;
-	    }
-	  }
-	}
-	$timestamp = strtotime("now");
-	return 0 . 'MJ' . $timestamp;
+        }
+      }
+    }
+    $timestamp = REQUEST_TIME;
+    return 0 . 'MJ' . $timestamp;
   }
 
-  static function recordBounce($params) {
-    $isSpam =  CRM_Utils_Array::value('is_spam', $params);
-    $mailingId = CRM_Utils_Array::value('mailing_id', $params); //CiviCRM mailling ID
-    $contactId = CRM_Utils_Array::value('contact_id' , $params);
-    $emailId =  CRM_Utils_Array::value('email_id' , $params);
-	  $email = CRM_Utils_Array::value('email' , $params);
-    $jobId = CRM_Utils_Array::value('job_id' , $params);
+  /**
+   * Record a bounce to the Database with the received data.
+   *
+   * @param $bounceData array
+   *  The required bounce data for processing.
+   *
+   * @return bool
+   */
+  static function recordBounce($bounceData) {
+    // Parse the bounce array, and retrieve all necessary data for processing.
+    $isSpam = CRM_Utils_Array::value('is_spam', $bounceData);
+    $contactId = CRM_Utils_Array::value('contact_id', $bounceData);
+    $emailId = CRM_Utils_Array::value('email_id', $bounceData);
+    $email = CRM_Utils_Array::value('email', $bounceData);
+    $jobId = CRM_Utils_Array::value('job_id', $bounceData);
+    // Create a new MJ event.
     $eqParams = array(
       'job_id' => $jobId,
       'contact_id' => $contactId,
       'email_id' => $emailId,
     );
-    //$eventQueue = CRM_Mailing_Event_BAO_Queue::create($eqParams);
-
-    $query = "SELECT id, hash
-              FROM civicrm_mailing_event_queue
-              WHERE job_id = {$jobId}
-              AND email_id = {$emailId}";
-    $dao = CRM_Core_DAO::executeQuery($query);
-
-    if ($dao->fetch()) {
-      $eventQueueId = $dao->id;
-      $eventQueueHash = $dao->hash;
-    }else{
-      return;
-    }
-
-    $time =  date('YmdHis', CRM_Utils_Array::value('date_ts', $params));
+    $eventQueue = CRM_Mailing_Event_BAO_Queue::create($eqParams);
+    // Process the bounce data, and mark the user accordingly.
+    $time = date('YmdHis', CRM_Utils_Array::value('date_ts', $bounceData));
     $bounceType = array();
     CRM_Core_PseudoConstant::populate($bounceType, 'CRM_Mailing_DAO_BounceType', TRUE, 'id', NULL, NULL, NULL, 'name');
-    $bounce  = new CRM_Mailing_Event_BAO_Bounce();
+    $bounce = new CRM_Mailing_Event_BAO_Bounce();
     $bounce->time_stamp = $time;
-    $bounce->event_queue_id = $eventQueueId;
-    $bounce->hash = $eventQueueHash;
-    $bounce->job_id = $jobId;
-    if($isSpam){
+    $bounce->event_queue_id = $eventQueue->id;
+    if ($isSpam) {
       $bounce->bounce_type_id = $bounceType[CRM_Mailjet_Upgrader::SPAM];
-      $bounce->bounce_reason = CRM_Utils_Array::value('source', $params); //bounce reason when spam occured
-    }else{
-     $hardBounce = CRM_Utils_Array::value('hard_bounce', $params);
-     $blocked = CRM_Utils_Array::value('blocked', $params); //  blocked : true if this bounce leads to recipient being blocked
-      if($hardBounce && $blocked){
-        $bounce->bounce_type_id = $bounceType[CRM_Mailjet_Upgrader::BLOCKED];
-      }else if($hardBounce && !$blocked){
-        $bounce->bounce_type_id = $bounceType[CRM_Mailjet_Upgrader::HARD_BOUNCE];
-      }else{
-        $bounce->bounce_type_id = $bounceType[CRM_Mailjet_Upgrader::SOFT_BOUNCE];
-      }
-      $bounce->bounce_reason  =  $params['error_related_to'] . " - " . $params['error'];
+      $bounce->bounce_reason = CRM_Utils_Array::value('source', $bounceData);
     }
+    else {
+      $hardBounce = CRM_Utils_Array::value('hard_bounce', $bounceData);
+      $blocked = CRM_Utils_Array::value('blocked', $bounceData);
+      if ($hardBounce && $blocked) {
+        $bounce->bounce_type_id = $bounceType[CRM_Mailjet_Upgrader::BLOCKED];
+      }
+      else {
+        if ($hardBounce && !$blocked) {
+          $bounce->bounce_type_id = $bounceType[CRM_Mailjet_Upgrader::HARD_BOUNCE];
+        }
+        else {
+          $bounce->bounce_type_id = $bounceType[CRM_Mailjet_Upgrader::SOFT_BOUNCE];
+        }
+      }
+      $bounce->bounce_reason = $bounceData['error_related_to'] . " - " . $bounceData['error'];
+    }
+    // Save the bounce.
     $bounce->save();
 
-    $query = "DELETE from civicrm_mailing_event_delivered
-              WHERE event_queue_id = {$eventQueueId}";
-    $dao = CRM_Core_DAO::executeQuery($query);
-
-    if($bounce->bounce_type_id == $bounceType[CRM_Mailjet_Upgrader::SOFT_BOUNCE]){
-    //put the email into on hold
-    $params = array(
-      'id' => $emailId,
-      'email' => $email,
-      'on_hold' => 1,
-      'hold_date' =>  $time,
-    );
-    civicrm_api3('Email', 'create', $params);
-    }else {
-      $params = array(
+    // If the current bounce is marked as a soft bounce (that might be sent
+    // eventually) we only mark the email as being on hold.
+    if ($bounce->bounce_type_id == $bounceType[CRM_Mailjet_Upgrader::SOFT_BOUNCE]) {
+      //put the email into on hold
+      $contactParams = array(
+        'id' => $emailId,
+        'email' => $email,
+        'on_hold' => 1,
+        'hold_date' => $time,
+      );
+      $entity = 'Email';
+    }
+    // If the current bounce is marked as a hard bounce (that won't send due to
+    // invalid email, domain, etc) then we mark the user as "don't mail".
+    else {
+      $contactParams = array(
         'id' => $contactId,
         'do_not_email' => 1,
       );
-      civicrm_api3('Contact', 'create', $params);
+      $entity = 'Contact';
     }
-
-    return TRUE;
+    // Mark the user accordingly.
+    $updateContact = civicrm_api3($entity, 'create', $contactParams);
+    // If there was no error while updating the contact, then the bounce save
+    // was successful.
+    if (empty($updateContact['is_error'])) {
+      return TRUE;
+    }
+    // If some problems were encountered while updating the contact, regardless
+    // of the problem we mark the processing as unsuccessful.
+    return FALSE;
   }
 }
